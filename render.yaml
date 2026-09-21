@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: nextxus-sim-api
+    runtime: docker
+    plan: free
+    envVars:
+      - key: EMERGENT_LLM_KEY
+        sync: false
