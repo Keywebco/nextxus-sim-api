@@ -4,5 +4,7 @@ services:
     runtime: docker
     plan: free
     envVars:
-      - key: EMERGENT_LLM_KEY
+      - key: MIMO_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
         sync: false

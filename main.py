@@ -1,7 +1,8 @@
 """
 NextXus SIM — Phase 2 Backend
 FastAPI service providing /messages and /braid endpoints.
-Uses Emergent universal LLM key via OpenAI-compatible endpoint.
+Uses MiMo first, then DeepSeek, via OpenAI-compatible endpoints.
+No Emergent key, URL, or model remains.
 """
 
 import os
@@ -36,9 +37,24 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-LLM_BASE_URL = "https://integrations.emergentagent.com/llm"
-LLM_API_KEY = os.environ.get("EMERGENT_LLM_KEY", "")
-LLM_MODEL = "claude-sonnet-4-5"
+# Providers, in order tried: MiMo first (cheapest, Pontus holds a key),
+# then DeepSeek. Emergent was removed 2026-11-05 — it lapses Nov 3 and
+# Roger ruled it out. No Emergent URL, key, or model remains in this file.
+# Render env vars to set: MIMO_API_KEY, DEEPSEEK_API_KEY.
+LLM_PROVIDERS = [
+    {
+        "name": "mimo",
+        "base_url": "https://api.xiaomimimo.com/v1",
+        "model": "mimo-v2.6-flash",
+        "api_key": os.environ.get("MIMO_API_KEY", ""),
+    },
+    {
+        "name": "deepseek",
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+        "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),
+    },
+]
 
 # ---------------------------------------------------------------------------
 # In-memory session state (resets on redeploy — sovereign by design)
@@ -127,38 +143,45 @@ class BraidResponse(BaseModel):
 # LLM call helper
 # ---------------------------------------------------------------------------
 async def call_llm(system_prompt: str, user_message: str) -> str:
-    """Call the Emergent LLM endpoint (OpenAI-compatible)."""
-    if not LLM_API_KEY:
-        return "[SIM Backend: EMERGENT_LLM_KEY not configured. Set the environment variable to enable AI responses.]"
+    """Call MiMo, then DeepSeek if MiMo fails (both OpenAI-compatible).
+    Returns the first provider's answer. If neither is configured, or
+    both fail, returns a plain error string — never a fake answer."""
+    configured = [p for p in LLM_PROVIDERS if p["api_key"]]
+    if not configured:
+        return "[SIM Backend: no LLM key configured. Set MIMO_API_KEY and/or DEEPSEEK_API_KEY in Render to enable AI responses.]"
 
-    headers = {
-        "Authorization": f"Bearer {LLM_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": LLM_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        "max_tokens": 512,
-        "temperature": 0.7,
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            resp = await client.post(
-                f"{LLM_BASE_URL}/v1/chat/completions",
-                headers=headers,
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data["choices"][0]["message"]["content"]
-        except httpx.HTTPStatusError as e:
-            return f"[SIM Backend: LLM returned {e.response.status_code}. Check configuration.]"
-        except Exception as e:
-            return f"[SIM Backend: LLM call failed — {type(e).__name__}]"
+    last_error = "no provider answered"
+    for provider in configured:
+        headers = {
+            "Authorization": f"Bearer {provider['api_key']}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": provider["model"],
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_message},
+            ],
+            "max_tokens": 512,
+            "temperature": 0.7,
+        }
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await client.post(
+                    f"{provider['base_url']}/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                return data["choices"][0]["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                last_error = f"{provider['name']} returned {e.response.status_code}"
+                continue
+            except Exception as e:
+                last_error = f"{provider['name']} call failed — {type(e).__name__}"
+                continue
+    return f"[SIM Backend: LLM call failed — {last_error}. Check configuration.]"
 
 # ---------------------------------------------------------------------------
 # Verify-percentage calculation (deterministic hash-based)
