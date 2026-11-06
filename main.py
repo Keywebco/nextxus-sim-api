@@ -168,7 +168,7 @@ async def call_llm(system_prompt: str, user_message: str) -> str:
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(
-                    f"{provider['base_url']}/v1/chat/completions",
+                    f"{provider['base_url']}/chat/completions",
                     headers=headers,
                     json=payload,
                 )
