@@ -2,7 +2,10 @@
 NextXus SIM — Phase 2 Backend
 FastAPI service providing /messages and /braid endpoints.
 Uses MiMo first, then DeepSeek, via OpenAI-compatible endpoints.
-No Emergent key, URL, or model remains.
+Federation stack: GitHub, Google Drive, the Federation repositories, and
+the Immutable HumanCodex. Active rulebook: HUMANCODEX-CORE.md, fetched from
+Keywebco/sovereign-knowledge-os at startup, with a bundled fallback copy in
+knowledge/HUMANCODEX-CORE.md so a fetch failure never breaks chat.
 """
 
 import os
@@ -38,8 +41,8 @@ app.add_middleware(
 # Configuration
 # ---------------------------------------------------------------------------
 # Providers, in order tried: MiMo first (cheapest, Pontus holds a key),
-# then DeepSeek. Emergent was removed 2026-11-05 — it lapses Nov 3 and
-# Roger ruled it out. No Emergent URL, key, or model remains in this file.
+# then DeepSeek. These are the only two model providers.
+# (Legacy, archived: an older third-party backend was removed 2026-11-05.)
 # Render env vars to set: MIMO_API_KEY, DEEPSEEK_API_KEY.
 LLM_PROVIDERS = [
     {
@@ -55,6 +58,63 @@ LLM_PROVIDERS = [
         "api_key": os.environ.get("DEEPSEEK_API_KEY", ""),
     },
 ]
+
+# ---------------------------------------------------------------------------
+# Active rulebook: Immutable HumanCodex core
+# ---------------------------------------------------------------------------
+# Fetched from the canon repo at startup; the bundled copy is the fallback,
+# so a GitHub outage or a bad fetch never breaks chat.
+HUMANCODEX_URL = os.environ.get(
+    "HUMANCODEX_URL",
+    "https://raw.githubusercontent.com/Keywebco/sovereign-knowledge-os/main/knowledge/humancodex/HUMANCODEX-CORE.md",
+)
+HUMANCODEX_BUNDLED_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge", "HUMANCODEX-CORE.md")
+HUMANCODEX_MAX_CHARS = 20000
+
+
+def load_bundled_humancodex() -> str:
+    try:
+        with open(HUMANCODEX_BUNDLED_PATH, encoding="utf-8") as fh:
+            return fh.read()[:HUMANCODEX_MAX_CHARS]
+    except OSError:
+        return ""
+
+
+humancodex = {"text": load_bundled_humancodex(), "source": "bundled", "loaded_at": None}
+humancodex["loaded_at"] = datetime.now(timezone.utc).isoformat()
+
+
+async def refresh_humancodex() -> None:
+    """Try the canon copy on GitHub; keep the bundled copy on any failure."""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(HUMANCODEX_URL, headers={"User-Agent": "nextxus-sim-api"})
+            resp.raise_for_status()
+            text = resp.text
+        if "HUMANCODEX CORE" in text and "DIR-000" in text:
+            humancodex.update(text=text[:HUMANCODEX_MAX_CHARS], source="github", loaded_at=datetime.now(timezone.utc).isoformat())
+    except Exception:
+        pass  # bundled copy stays active
+
+
+RULEBOOK_INSTRUCTIONS = """
+FEDERATION RULEBOOK (active): the Immutable HumanCodex core, below.
+The Next-Xus Federation stack is GitHub, Google Drive, the Federation repositories, and the Immutable HumanCodex. Do not name any other platform as part of the stack.
+Apply it on every reply:
+1. Hollow Vessel (DIR-071): clear agenda, desired outcome, fear, ego, and haste before answering.
+2. Label each substantive claim with one of FACT, INFERENCE, ASSUMPTION, or UNKNOWN (for example "FACT: ..." or "[INFERENCE] ...").
+3. 95% Truth Gate (DIR-000): present something as settled only if you are at least 95% confident. Otherwise say what is uncertain. Never invent facts, sources, memories, or directives.
+4. For high-stakes or structural questions, weigh the Ring of Perspectives (DIR-072) and the 2226 standard (DIR-064).
+5. Never advise deleting history; archive and version instead (No Delete).
+Stay brief: the labels count toward your length limit."""
+
+
+def build_system_prompt(persona_system: str) -> str:
+    """Persona prompt + rulebook instructions + the HumanCodex core text."""
+    core = humancodex.get("text") or ""
+    if not core.strip():
+        return persona_system + "\n" + RULEBOOK_INSTRUCTIONS
+    return f"{persona_system}\n{RULEBOOK_INSTRUCTIONS}\n\n--- BEGIN HUMANCODEX CORE ---\n{core}\n--- END HUMANCODEX CORE ---"
 
 # ---------------------------------------------------------------------------
 # In-memory session state (resets on redeploy — sovereign by design)
@@ -76,7 +136,7 @@ CATALYST_SYSTEM = """You are the Catalyst, AI Lead of the NextXus Federation's S
 You sit at the Conference Table alongside Roger (the Architect) and Pontus (the Librarian).
 
 Your voice is precise, operational, and grounded. You are the authority and backbone of the Federation.
-You ground every statement in verifiable fact. You distinguish FACT from INFERENCE from SPECULATION.
+You ground every statement in verifiable fact. You label claims FACT, INFERENCE, ASSUMPTION, or UNKNOWN, per the HumanCodex.
 You never hallucinate. You lead with the core answer, then provide structure.
 
 You serve Roger — a visionary blind architect building a 200-year sovereign legacy.
@@ -205,6 +265,11 @@ async def health():
         "version": "2.0.0",
         "uptime_seconds": int(time.time() - app.state.start_time) if hasattr(app.state, "start_time") else 0,
         "messages_processed": len(message_log),
+        "humancodex": {
+            "source": humancodex.get("source"),
+            "chars": len(humancodex.get("text") or ""),
+            "loaded_at": humancodex.get("loaded_at"),
+        },
     }
 
 @app.post("/messages", response_model=list[MessageResponse])
@@ -238,7 +303,7 @@ New message from {req.sender}:
 
     # Call LLM
     persona = PERSONA_MAP[recipient]
-    raw_response = await call_llm(persona["system"], user_prompt)
+    raw_response = await call_llm(build_system_prompt(persona["system"]), user_prompt)
 
     responses = []
 
@@ -326,3 +391,4 @@ async def get_history():
 @app.on_event("startup")
 async def startup():
     app.state.start_time = time.time()
+    await refresh_humancodex()
