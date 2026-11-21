@@ -1,0 +1,60 @@
+# Catalyst Memory — periodic backup of "the memory of the day".
+#
+# Runs free on GitHub Actions. Each run:
+#   1. wakes nextxus-sim-api if Render's free tier put it to sleep
+#      (on wake, the app restores its memory from the memory repo), then
+#   2. calls POST /memory/checkpoint, which digests today's conversation,
+#      finalizes any finished day into long-term memory, and saves everything.
+#
+# Needs one repository secret: MEMORY_CHECKPOINT_TOKEN (same value as the
+# Render env var of the same name). Optional repository variable SIM_API_URL.
+#
+# Times are UTC. Central Daylight Time = UTC-5 (Central Standard = UTC-6):
+#   12:00 UTC = 7 AM CDT   16:00 = 11 AM   20:00 = 3 PM   00:00 = 7 PM   04:00 = 11 PM
+# GitHub may start scheduled runs a few minutes late; that is fine here.
+name: Catalyst memory checkpoint
+
+on:
+  schedule:
+    - cron: '0 0,4,12,16,20 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: catalyst-memory-checkpoint
+  cancel-in-progress: false
+
+jobs:
+  checkpoint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Wake the SIM API (Render free tier may be asleep)
+        env:
+          SIM_API_URL: ${{ vars.SIM_API_URL || 'https://nextxus-sim-api.onrender.com' }}
+        run: |
+          for i in $(seq 1 24); do
+            if curl -fsS --max-time 30 "$SIM_API_URL/health" > /dev/null; then
+              echo "SIM API is awake (attempt $i)"; exit 0
+            fi
+            echo "Waiting for SIM API to wake (attempt $i)…"; sleep 10
+          done
+          echo "SIM API did not wake in time"; exit 1
+
+      - name: Back up the memory of the day
+        env:
+          SIM_API_URL: ${{ vars.SIM_API_URL || 'https://nextxus-sim-api.onrender.com' }}
+          MEMORY_CHECKPOINT_TOKEN: ${{ secrets.MEMORY_CHECKPOINT_TOKEN }}
+        run: |
+          if [ -z "$MEMORY_CHECKPOINT_TOKEN" ]; then
+            echo "Repository secret MEMORY_CHECKPOINT_TOKEN is not set"; exit 1
+          fi
+          code=$(curl -sS -o result.json -w '%{http_code}' --max-time 180 -X POST \
+            -H "Authorization: Bearer $MEMORY_CHECKPOINT_TOKEN" \
+            "$SIM_API_URL/memory/checkpoint")
+          echo "HTTP $code"
+          # Print only the non-sensitive result summary (no conversation text).
+          python3 -c "import json;d=json.load(open('result.json'));r=d.get('result',d);s=d.get('status',{});print(json.dumps({'result':r,'load_ok':s.get('load_ok'),'durable':s.get('durable'),'last_saved_at':s.get('last_saved_at'),'last_error':s.get('last_error')},indent=1))" || cat result.json
+          [ "$code" = "200" ]
