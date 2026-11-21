@@ -8,3 +8,10 @@ services:
         sync: false
       - key: DEEPSEEK_API_KEY
         sync: false
+      # --- Catalyst Memory (see CATALYST_MEMORY.md) ---
+      - key: MEMORY_GITHUB_TOKEN        # fine-grained PAT: Contents read/write on the memory repo only
+        sync: false
+      - key: MEMORY_GITHUB_REPO
+        value: Keywebco/catalyst-memory
+      - key: MEMORY_CHECKPOINT_TOKEN    # random secret shared with the GitHub Actions workflow
+        sync: false
