@@ -40,9 +40,24 @@ app = FastAPI(
     description="The Shared Mind — sovereign conference backend for the NextXus Federation.",
 )
 
+# CORS allowlist: Federation origins only, no wildcard — the same allowlist
+# as roger-sim-api (security fix e629a36, 2026-11-27). Requests with no
+# Origin header (curl, monitors, server-to-server) pass through as before.
+# Localhost is allowed so local development keeps working.
+FEDERATION_ORIGINS = [
+    "https://keywebco.github.io",
+    "https://next-xus.biz",
+    "https://www.next-xus.biz",
+    "https://next-xus.net",
+    "https://next-xus.info",
+    "https://next-xus.org",
+    "https://next-xus.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # GitHub Pages + any sovereign mirror
+    allow_origins=FEDERATION_ORIGINS,
+    allow_origin_regex=r"http://localhost(?::\d+)?",
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
